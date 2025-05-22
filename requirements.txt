@@ -1,5 +1,5 @@
 python-telegram-bot==20.6
 opencv-python-headless
-numpy
 pillow
-httpx
+numpy
+httpx~=0.25.0
