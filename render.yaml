@@ -1,0 +1,15 @@
+
+services:
+  - type: web
+    name: telegram-webhook
+    env: python
+    buildCommand: ""
+    startCommand: python bot.py
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+    autoDeploy: true
+    ports:
+      - port: 10000
+        protocol: http
