@@ -12,7 +12,7 @@ import io
 import httpx
 
 logging.basicConfig(level=logging.INFO)
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TOKEN = "7490249052:AAEaldElMOFFJwn9WIvuSR0bx6tFaebeR0k"
 
 def generate_gmail():
     user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
