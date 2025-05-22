@@ -1,65 +1,78 @@
 
 import logging
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import random
-import string
-import os
-import cv2
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+import re, io
 import numpy as np
+import cv2
 from PIL import Image
-import io
-import httpx
 
-logging.basicConfig(level=logging.INFO)
 TOKEN = "7490249052:AAEaldElMOFFJwn9WIvuSR0bx6tFaebeR0k"
 
-def generate_gmail():
-    user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    return f"{user}@gmail.com"
+logging.basicConfig(level=logging.INFO)
 
-def get_direct_link(file_id: str) -> str:
-    return f"https://drive.google.com/uc?export=download&id={file_id}"
+def extract_file_id(drive_url: str) -> str | None:
+    patterns = [
+        r'drive.google.com\/file\/d\/([a-zA-Z0-9_-]+)',
+        r'drive.google.com\/open\?id=([a-zA-Z0-9_-]+)'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, drive_url)
+        if match:
+            return match.group(1)
+    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Я могу:\n1️⃣ Сгенерировать Gmail\n2️⃣ Получить прямую ссылку с Google Диска\n3️⃣ Прочитать QR по фото\n\nПришли мне ID файла, изображение или используй /gmail")
+    await update.message.reply_text("👋 Привет! Отправь:
+- Ссылку на Google Диск
+- Фото с QR-кодом")
 
-async def gmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    email = generate_gmail()
-    await update.message.reply_text(f"📧 Gmail: `{email}`", parse_mode="Markdown")
-
-async def drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❗ Пришли ID файла Google Drive, например:\n`/drive 1x2x3x4x5`", parse_mode="Markdown")
+async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message.text
+    file_id = extract_file_id(message)
+    if not file_id:
+        await update.message.reply_text("❗ Не удалось извлечь ID файла из ссылки Google Диска.")
         return
-    file_id = context.args[0]
-    direct_link = get_direct_link(file_id)
-    await update.message.reply_text(f"🔗 Прямая ссылка:\n{direct_link}")
+    direct_link = f"https://drive.google.com/uc?export=download&id={file_id}"
+    keyboard = [
+        [InlineKeyboardButton("📋 Скопировать ссылку", callback_data=f"copy_drive|{direct_link}")],
+        [InlineKeyboardButton("🔗 Перейти по ссылке", url=direct_link)]
+    ]
+    await update.message.reply_text(f"✅ Прямая ссылка:\n{direct_link}", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def scan_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo:
-        await update.message.reply_text("📷 Пожалуйста, отправь изображение с QR-кодом.")
-        return
-
-    photo_file = await update.message.photo[-1].get_file()
-    photo_bytes = await photo_file.download_as_bytearray()
-    np_arr = np.frombuffer(photo_bytes, np.uint8)
-    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+def decode_qr_from_photo(file_bytes) -> str | None:
+    image = Image.open(file_bytes).convert("RGB")
+    img_np = np.array(image)
     detector = cv2.QRCodeDetector()
-    data, points, _ = detector.detectAndDecode(image)
+    data, _, _ = detector.detectAndDecode(img_np)
+    return data if data else None
 
-    if data:
-        await update.message.reply_text(f"✅ QR-код распознан:\n{data}")
-    else:
+async def handle_qr_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = await update.message.photo[-1].get_file()
+    photo_bytes = await photo.download_as_bytearray()
+    qr_data = decode_qr_from_photo(io.BytesIO(photo_bytes))
+    if not qr_data:
         await update.message.reply_text("❌ QR-код не распознан.")
+        return
+    keyboard = [[InlineKeyboardButton("📋 Скопировать", callback_data=f"copy_qr|{qr_data}")]]
+    if qr_data.startswith("http"):
+        keyboard.append([InlineKeyboardButton("🔗 Перейти по ссылке", url=qr_data)])
+    await update.message.reply_text(f"✅ QR-содержимое:\n{qr_data}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data.startswith("copy_drive|") or data.startswith("copy_qr|"):
+        _, payload = data.split("|", 1)
+        await query.message.reply_text(f"📋 Скопировано:\n{payload}")
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("gmail", gmail))
-    app.add_handler(CommandHandler("drive", drive))
-    app.add_handler(MessageHandler(filters.PHOTO, scan_qr))
-    print("Бот запущен...")
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("drive.google.com"), handle_drive_link))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_qr_photo))
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.run_polling()
 
 if __name__ == "__main__":
