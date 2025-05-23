@@ -1,114 +1,137 @@
+
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-import re
-import cv2
 import numpy as np
+import cv2
 import io
-from PIL import Image
 
 TOKEN = "7490249052:AAEaldElMOFFJwn9WIvuSR0bx6tFaebeR0k"
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    text = (
         "👋 Привет! Используй команды:
 "
-        "/gmail — генерация Gmail-вариантов
+        "/gmail <email> – сгенерировать варианты Gmail
 "
-        "/drive — преобразование ссылки Google Диска
+        "/drive <file_id> – получить прямую ссылку на файл
 "
-        "/qr — распознавание QR-кода с картинки"
+        "/qr – отправь изображение с QR кодом"
     )
+    await update.message.reply_text(text)
 
-async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введите адрес Gmail:")
+def generate_gmail_variants(email: str):
+    local, domain = email.split('@')
+    variants = set()
 
-async def drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправьте ссылку на файл Google Диска.")
+    if domain not in ("gmail.com", "googlemail.com"):
+        return []
 
-async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправьте изображение с QR-кодом.")
+    def insert_dots(name):
+        return [name[:i] + '.' + name[i:] for i in range(1, len(name))]
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if "@gmail.com" in text:
-        prefix = text.replace("@gmail.com", "")
-        variants = [f"{prefix}@gmail.com", f"{prefix}@googlemail.com"]
-        for i in range(1, len(prefix)):
-            variants.append(f"{prefix[:i]}.{prefix[i:]}@gmail.com")
-        reply_text = "\n".join(variants)
-        buttons = [
-            [InlineKeyboardButton("Скопировать все", callback_data="copy_gmail")],
-            [InlineKeyboardButton("Скачать .txt", callback_data="txt_gmail")],
-            [InlineKeyboardButton("Экспорт в CSV", callback_data="csv_gmail")]
-        ]
-        await update.message.reply_text(reply_text, reply_markup=InlineKeyboardMarkup(buttons))
-    elif "drive.google.com" in text:
-        file_id = None
-        match = re.search(r"/d/([a-zA-Z0-9_-]+)", text)
-        if match:
-            file_id = match.group(1)
-        else:
-            alt_match = re.search(r"id=([a-zA-Z0-9_-]+)", text)
-            if alt_match:
-                file_id = alt_match.group(1)
-        if file_id:
-            link = f"https://drive.google.com/uc?export=download&id={file_id}"
-            buttons = [
-                [InlineKeyboardButton("Скопировать", callback_data="copy_link")],
-                [InlineKeyboardButton("Перейти", url=link)]
-            ]
-            await update.message.reply_text(link, reply_markup=InlineKeyboardMarkup(buttons))
-        else:
-            await update.message.reply_text("Не удалось извлечь ID файла из ссылки.")
-    else:
-        await update.message.reply_text("Введите корректный адрес Gmail или ссылку на Google Диск.")
+    queue = [local]
+    for _ in range(len(local) - 1):
+        queue += [v for x in queue for v in insert_dots(x) if '.' not in x]
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for variant in set(queue):
+        variants.add(f"{variant}@gmail.com")
+        variants.add(f"{variant}@googlemail.com")
+
+    return sorted(variants)
+
+async def gmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Укажи адрес Gmail, например: /gmail example@gmail.com")
+        return
+
+    email = context.args[0]
+    variants = generate_gmail_variants(email)
+    if not variants:
+        await update.message.reply_text("Некорректный Gmail адрес.")
+        return
+
+    text = "
+".join(variants)
+    keyboard = [
+        [InlineKeyboardButton("Скопировать все", callback_data="copy_gmail")],
+        [InlineKeyboardButton("Скачать txt", callback_data="download_txt")],
+        [InlineKeyboardButton("Экспорт в CSV", callback_data="download_csv")]
+    ]
+    context.user_data["gmail_variants"] = text
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = query.data
+    data = context.user_data.get("gmail_variants", "")
+
+    if action == "copy_gmail":
+        await query.message.reply_text(data)
+    elif action == "download_txt":
+        await query.message.reply_document(document=InputFile(io.BytesIO(data.encode()), filename="gmail_variants.txt"))
+    elif action == "download_csv":
+        csv_data = data.replace("
+", ",")
+        await query.message.reply_document(document=InputFile(io.BytesIO(csv_data.encode()), filename="gmail_variants.csv"))
+
+async def drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Укажи ID файла Google Диска, например: /drive 1aBcD...")
+        return
+
+    file_id = context.args[0]
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    keyboard = [
+        [InlineKeyboardButton("Скопировать ссылку", callback_data="copy_drive")],
+        [InlineKeyboardButton("Перейти", url=url)]
+    ]
+    context.user_data["drive_link"] = url
+    await update.message.reply_text(f"🔗 Прямая ссылка:
+{url}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = await update.message.photo[-1].get_file()
-    file_bytes = await photo.download_as_bytearray()
-    np_arr = np.frombuffer(file_bytes, np.uint8)
-    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    image_bytes = await photo.download_as_bytearray()
+
+    image_array = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+
     detector = cv2.QRCodeDetector()
     data, _, _ = detector.detectAndDecode(img)
+
     if data:
-        buttons = [
+        keyboard = [
             [InlineKeyboardButton("Скопировать", callback_data="copy_qr")],
             [InlineKeyboardButton("Перейти", url=data)]
         ]
-        await update.message.reply_text(f"QR-код: {data}", reply_markup=InlineKeyboardMarkup(buttons))
+        context.user_data["qr_data"] = data
+        await update.message.reply_text(f"QR код: {data}", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text("Не удалось распознать QR-код.")
+        await update.message.reply_text("QR код не найден.")
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_qr_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "copy_gmail":
-        await query.edit_message_text("Скопируй текст вручную.")
-    elif query.data == "txt_gmail":
-        content = query.message.text.replace("\n", "\r\n")
-        await query.message.reply_document(document=io.BytesIO(content.encode()), filename="gmail_variants.txt")
-    elif query.data == "csv_gmail":
-        content = query.message.text.replace("\n", "\n")
-        csv_data = content.replace("\n", ",\n")
-        await query.message.reply_document(document=io.BytesIO(csv_data.encode()), filename="gmail_variants.csv")
-    elif query.data == "copy_link":
-        await query.edit_message_text("Скопируй ссылку вручную.")
-    elif query.data == "copy_qr":
-        await query.edit_message_text("Скопируй QR-содержимое вручную.")
+    data = context.user_data.get("qr_data", "")
+    if query.data == "copy_qr":
+        await query.message.reply_text(data)
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("gmail", gmail_command))
-    app.add_handler(CommandHandler("drive", drive_command))
-    app.add_handler(CommandHandler("qr", qr_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(CommandHandler("gmail", gmail))
+    app.add_handler(CommandHandler("drive", drive))
+    app.add_handler(MessageHandler(filters.PHOTO, photo))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(CallbackQueryHandler(handle_qr_button, pattern="copy_qr"))
     app.run_polling()
 
 if __name__ == "__main__":
