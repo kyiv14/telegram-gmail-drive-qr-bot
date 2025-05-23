@@ -1,124 +1,132 @@
-
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import re
-import io
+import os
 import csv
-from PIL import Image
-import numpy as np
+import io
 import cv2
-
-TOKEN = "7490249052:AAEaldElMOFFJwn9WIvuSR0bx6tFaebeR0k"
+import numpy as np
+from PIL import Image
+import tempfile
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-def generate_gmail_variants(base_email: str):
-    username, domain = base_email.split("@")
-    if domain != "gmail.com":
-        return []
-    variants = set()
-    for i in range(1 << (len(username) - 1)):
-        s = username[0]
-        for j in range(1, len(username)):
-            s += ("." if (i >> (j - 1)) & 1 else "") + username[j]
-        variants.add(s + "@gmail.com")
-        variants.add(s + "@googlemail.com")
-    return sorted(variants)
+BOT_TOKEN = "7490249052:AAEaldElMOFFJwn9WIvuSR0bx6tFaebeR0k"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    text = (
         "👋 Привет! Используй команды:
 "
-        "/gmail <ваша_почта>
+        "/gmail - Генерация Gmail вариантов
 "
-        "/drive <google_drive_url>
+        "/drive - Преобразование ссылки Google Drive
 "
-        "или отправьте изображение с QR-кодом"
+        "/qr - Сканирование QR-кода с изображения"
     )
+    await update.message.reply_text(text)
 
-async def handle_gmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Укажите email, например: /gmail test@gmail.com")
-        return
-    base_email = context.args[0]
-    variants = generate_gmail_variants(base_email)
-    if not variants:
-        await update.message.reply_text("Почта должна быть в домене gmail.com")
-        return
-    txt_output = "
-".join(variants)
-    keyboard = [
-        [InlineKeyboardButton("Скопировать все", switch_inline_query=txt_output)],
-        [InlineKeyboardButton("Скачать .txt", callback_data="download_txt")],
-        [InlineKeyboardButton("Экспорт CSV", callback_data="download_csv")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(txt_output, reply_markup=reply_markup)
-    context.user_data["variants"] = variants
+def generate_gmail_variants(email):
+    local, domain = email.lower().split('@')
+    if domain not in ["gmail.com", "googlemail.com"]:
+        return []
+    variants = set()
+    for i in range(1 << (len(local)-1)):
+        with_dots = local[0]
+        for j in range(1, len(local)):
+            with_dots += ('.' if (i >> (j-1)) & 1 else '') + local[j]
+        variants.add(with_dots + '@gmail.com')
+        variants.add(with_dots + '@googlemail.com')
+    return sorted(variants)
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    variants = context.user_data.get("variants", [])
-    if query.data == "download_txt":
-        txt = "
-".join(variants)
-        bio = io.BytesIO(txt.encode("utf-8"))
-        bio.name = "emails.txt"
-        await query.message.reply_document(bio)
-    elif query.data == "download_csv":
-        bio = io.BytesIO()
-        writer = csv.writer(io.TextIOWrapper(bio, "utf-8", newline=""))
-        for v in variants:
-            writer.writerow([v])
-        bio.seek(0)
-        bio.name = "emails.csv"
-        await query.message.reply_document(bio)
+async def gmail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Введи адрес Gmail (например, testuser@gmail.com):")
 
-async def handle_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Укажите ссылку, например: /drive https://drive.google.com/file/d/ID/view")
-        return
-    url = context.args[0]
-    match = re.search(r"/d/([\w-]+)", url)
-    if not match:
-        await update.message.reply_text("Неверная ссылка")
-        return
-    file_id = match.group(1)
-    direct_link = f"https://drive.google.com/uc?export=download&id={file_id}"
-    keyboard = [
-        [InlineKeyboardButton("Преобразовать и скопировать", switch_inline_query=direct_link)],
-        [InlineKeyboardButton("Перейти", url=direct_link)]
-    ]
-    await update.message.reply_text(direct_link, reply_markup=InlineKeyboardMarkup(keyboard))
+async def drive_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Вставь ссылку на файл в Google Drive:")
+
+async def qr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Отправь изображение с QR-кодом.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if '@gmail.com' in text or '@googlemail.com' in text:
+        variants = generate_gmail_variants(text)
+        if variants:
+            variants_text = "\n".join(variants)
+            keyboard = [[
+                InlineKeyboardButton("Скопировать все", callback_data="copy_gmail"),
+                InlineKeyboardButton("Скачать .txt", callback_data="download_txt"),
+                InlineKeyboardButton("Экспорт CSV", callback_data="download_csv")
+            ]]
+            context.user_data["gmail_variants"] = variants
+            await update.message.reply_text(variants_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.message.reply_text("Неверный Gmail адрес.")
+
+    elif "drive.google.com" in text:
+        file_id_match = re.search(r'/d/([a-zA-Z0-9_-]+)|id=([a-zA-Z0-9_-]+)', text)
+        file_id = file_id_match.group(1) if file_id_match else file_id_match.group(2) if file_id_match else None
+        if file_id:
+            link = f"https://drive.google.com/uc?export=download&id={file_id}"
+            context.user_data["drive_link"] = link
+            keyboard = [[
+                InlineKeyboardButton("Скопировать ссылку", callback_data="copy_drive"),
+                InlineKeyboardButton("Перейти по ссылке", url=link)
+            ]]
+            await update.message.reply_text(link, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.message.reply_text("Не удалось извлечь ID из ссылки.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_file = await update.message.photo[-1].get_file()
-    bio = io.BytesIO()
-    await photo_file.download_to_memory(out=bio)
-    bio.seek(0)
-    image = Image.open(bio)
-    image_np = np.array(image.convert("RGB"))
-    detector = cv2.QRCodeDetector()
-    data, _, _ = detector.detectAndDecode(image_np)
-    if data:
-        keyboard = [
-            [InlineKeyboardButton("Скопировать", switch_inline_query=data)],
-            [InlineKeyboardButton("Перейти", url=data)]
-        ]
-        await update.message.reply_text(f"QR-содержимое: {data}", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.message.reply_text("QR-код не найден")
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        await photo_file.download_to_drive(tmp.name)
+        img = cv2.imread(tmp.name)
+        detector = cv2.QRCodeDetector()
+        data, _, _ = detector.detectAndDecode(img)
+        if data:
+            context.user_data["qr_data"] = data
+            keyboard = [[
+                InlineKeyboardButton("Скопировать", callback_data="copy_qr"),
+                InlineKeyboardButton("Перейти", url=data if data.startswith("http") else f"http://{data}")
+            ]]
+            await update.message.reply_text(f"QR-код: {data}", reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.message.reply_text("QR-код не найден.")
+
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "copy_gmail":
+        await query.edit_message_text("\n".join(context.user_data.get("gmail_variants", [])))
+    elif query.data == "download_txt":
+        text_data = "\n".join(context.user_data.get("gmail_variants", []))
+        await query.message.reply_document(document=InputFile(io.BytesIO(text_data.encode()), filename="emails.txt"))
+    elif query.data == "download_csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        for email in context.user_data.get("gmail_variants", []):
+            writer.writerow([email])
+        await query.message.reply_document(document=InputFile(io.BytesIO(output.getvalue().encode()), filename="emails.csv"))
+    elif query.data == "copy_drive":
+        await query.edit_message_text(context.user_data.get("drive_link", ""))
+    elif query.data == "copy_qr":
+        await query.edit_message_text(context.user_data.get("qr_data", ""))
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("gmail", handle_gmail))
-    app.add_handler(CommandHandler("drive", handle_drive))
-    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(CommandHandler("gmail", gmail_handler))
+    app.add_handler(CommandHandler("drive", drive_handler))
+    app.add_handler(CommandHandler("qr", qr_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CallbackQueryHandler(handle_buttons))
+
     app.run_polling()
 
 if __name__ == "__main__":
